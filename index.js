@@ -17,7 +17,8 @@ const TOKEN = 'MTUzNzU2ODUwNzE3MTA0NTUyNw.GdD9GG.JPV8g3UsCkZ5Tn4ZxQmMelii_x0Md4s
 const MP_ACCESS_TOKEN = 'APP_USR-7083602225040875-081317-dd8ad3a00eb653e204b9b4cf61a98a08-1399781162';
 const CARGO_JOGADOR_ID = '1537574697129091162';
 // =====================================================================
-
+const http = require('http');
+http.createServer((req, res) => res.end('Bot Online!')).listen(process.env.PORT || 3000);
 // Inicializa a SDK do Mercado Pago
 const mpClient = new MercadoPagoConfig({ accessToken: MP_ACCESS_TOKEN });
 const paymentClient = new Payment(mpClient);
