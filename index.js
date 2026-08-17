@@ -7,19 +7,21 @@ const {
     EmbedBuilder, 
     ChannelType, 
     PermissionsBitField,
-    AttachmentBuilder
+    AttachmentBuilder,
+    REST,
+    Routes,
+    SlashCommandBuilder
 } = require('discord.js');
 const { MercadoPagoConfig, Payment } = require('mercadopago');
-const QRCode = require('qrcode');
 
-// ==================== CONFIGURAÇÕES DO SEU PROJETO ====================
-const TOKEN = 'MTUzNzU2ODUwNzE3MTA0NTUyNw.GdD9GG.JPV8g3UsCkZ5Tn4ZxQmMelii_x0Md4stzRNfrk'; 
-const MP_ACCESS_TOKEN = 'APP_USR-7083602225040875-081317-dd8ad3a00eb653e204b9b4cf61a98a08-1399781162';
+// ==================== CONFIGURAÇÕES ====================
+const TOKEN = process.env.DISCORD_TOKEN || 'SEU_NOVO_TOKEN_AQUI'; 
+const MP_ACCESS_TOKEN = process.env.MP_TOKEN || 'SEU_NOVO_MP_ACCESS_TOKEN_AQUI';
 const CARGO_JOGADOR_ID = '1537574697129091162';
-// =====================================================================
-const http = require('http');
-http.createServer((req, res) => res.end('Bot Online!')).listen(process.env.PORT || 3000);
-// Inicializa a SDK do Mercado Pago
+const VALOR_INCRICAO = 4.00;
+const TAMANHO_MAXIMO_LOBBY = 32;
+// =======================================================
+
 const mpClient = new MercadoPagoConfig({ accessToken: MP_ACCESS_TOKEN });
 const paymentClient = new Payment(mpClient);
 
@@ -32,103 +34,139 @@ const client = new Client({
     ]
 });
 
-client.once('ready', () => {
+// Estado global da fila e mensagem do painel
+let jogadoresInscritos = []; // Armazena { id: 'userID', tag: 'userTag' }
+let painelMessageId = null;
+let painelChannelId = null;
+
+// Registrar Slash Commands (/iniciar-partida e /resetar-lobby)
+const commands = [
+    new SlashCommandBuilder()
+        .setName('iniciar-partida')
+        .setDescription('Envia a chave e o código do mapa para todos os 32 jogadores inscritos no privado.')
+        .addStringOption(option => 
+            option.setName('chave')
+                .setDescription('Chave personalizada da sala do Fortnite (ex: ZONE32)')
+                .setRequired(true))
+        .addStringOption(option => 
+            option.setName('mapa')
+                .setDescription('Código do mapa de Zone Wars')
+                .setRequired(true)),
+
+    new SlashCommandBuilder()
+        .setName('resetar-lobby')
+        .setDescription('Zera a fila manualmente e libera o painel para novas inscrições.')
+].map(cmd => cmd.toJSON());
+
+client.once('ready', async () => {
     console.log(`🤖 Bot Automatizado Online como: ${client.user.tag}`);
+    
+    // Registrar comandos / no Discord
+    const rest = new REST({ version: '10' }).setToken(TOKEN);
+    try {
+        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+        console.log('✅ Slash Commands (/iniciar-partida e /resetar-lobby) registrados!');
+    } catch (error) {
+        console.error('Erro ao registrar Slash Commands:', error);
+    }
 });
 
-// 1. Comando de Setup do Painel
+// Funções Utilitárias para o Painel
+function gerarEmbedPainel() {
+    const qtd = jogadoresInscritos.length;
+    return new EmbedBuilder()
+        .setTitle('🏆 ZONE WARS COMPETITIVO - LOBBY R$ 4,00')
+        .setDescription(
+            `Entre no lobby pago e busque as maiores premiações em Pix!\n\n` +
+            `📊 **STATUS DO LOBBY:** \`[ ${qtd} / ${TAMANHO_MAXIMO_LOBBY} ]\` Players Inscritos\n` +
+            `💸 **Valor da Inscrição:** R$ ${VALOR_INCRICAO.toFixed(2)}\n\n` +
+            `*Assim que o lobby atingir ${TAMANHO_MAXIMO_LOBBY} jogadores, as entradas fecham e a chave será enviada na DM dos confirmados.*`
+        )
+        .setColor(qtd >= TAMANHO_MAXIMO_LOBBY ? '#E74C3C' : '#2ECC71')
+        .setFooter({ text: 'Pagamento 100% Automático via PIX' });
+}
+
+function gerarBotaoPainel() {
+    const desabilitado = jogadoresInscritos.length >= TAMANHO_MAXIMO_LOBBY;
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('btn_entrar_lobby')
+            .setLabel(desabilitado ? 'Lobby Lotado (32/32)' : `Entrar no Lobby (R$ ${VALOR_INCRICAO.toFixed(2)})`)
+            .setStyle(desabilitado ? ButtonStyle.Danger : ButtonStyle.Success)
+            .setDisabled(desabilitado)
+    );
+}
+
+async function atualizarPainelPrincipal() {
+    if (!painelChannelId || !painelMessageId) return;
+    try {
+        const channel = await client.channels.fetch(painelChannelId);
+        const msg = await channel.messages.fetch(painelMessageId);
+        await msg.edit({ embeds: [gerarEmbedPainel()], components: [gerarBotaoPainel()] });
+    } catch (err) {
+        console.error('Erro ao atualizar mensagem do painel:', err);
+    }
+}
+
+// 1. Comando !setup-zone para criar o painel
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
 
-    if (message.content === '!setup-ticket') {
+    if (message.content === '!setup-zone') {
         if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
             return message.reply('❌ Apenas administradores podem usar este comando.');
         }
 
-        const embed = new EmbedBuilder()
-            .setTitle('🏆 INSCRIÇÕES ZONE WARS - AUTOMÁTICO')
-            .setDescription(
-                'Clique na categoria desejada para abrir seu ticket privado, gerar o **QR Code Pix automático** e garantir sua vaga na partida!\n\n' +
-                '💸 **Escolha seu Lobby:**\n' +
-                '🟢 **Casual:** R$ 3,99\n' +
-                '🟡 **Prata:** R$ 5,99\n' +
-                '🔴 **Elite:** R$ 9,99'
-            )
-            .setColor('#1EC45C')
-            .setFooter({ text: 'Pagamento 100% Automático via PIX' });
+        const msg = await message.channel.send({
+            embeds: [gerarEmbedPainel()],
+            components: [gerarBotaoPainel()]
+        });
 
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setCustomId('btn_casual')
-                .setLabel('🟢 Casual (R$ 3,99)')
-                .setStyle(ButtonStyle.Success),
-            new ButtonBuilder()
-                .setCustomId('btn_prata')
-                .setLabel('🟡 Prata (R$ 5,99)')
-                .setStyle(ButtonStyle.Primary),
-            new ButtonBuilder()
-                .setCustomId('btn_elite')
-                .setLabel('🔴 Elite (R$ 9,99)')
-                .setStyle(ButtonStyle.Danger)
-        );
-
-        await message.channel.send({ embeds: [embed], components: [row] });
-        await message.delete();
+        painelMessageId = msg.id;
+        painelChannelId = message.channel.id;
+        await message.delete().catch(() => {});
     }
 });
 
-// 2. Interações com os Botões
+// 2. Interações com o Botão de Inscrição
 client.on('interactionCreate', async (interaction) => {
-    if (!interaction.isButton()) return;
+    if (interaction.isButton() && interaction.customId === 'btn_entrar_lobby') {
+        const user = interaction.user;
+        const guild = interaction.guild;
 
-    const guild = interaction.guild;
-    const user = interaction.user;
+        // Verificar se o usuário já está no lobby
+        if (jogadoresInscritos.some(p => p.id === user.id)) {
+            return interaction.reply({ content: '❌ Você já está inscrito neste lobby!', ephemeral: true });
+        }
 
-    // Definição de valores baseada no botão clicado
-    let valor = 0;
-    let nomeLobby = '';
+        if (jogadoresInscritos.length >= TAMANHO_MAXIMO_LOBBY) {
+            return interaction.reply({ content: '❌ Este lobby acabou de lotar! Aguarde a próxima rodada.', ephemeral: true });
+        }
 
-    if (interaction.customId === 'btn_casual') { valor = 3.99; nomeLobby = 'Casual'; }
-    if (interaction.customId === 'btn_prata') { valor = 5.99; nomeLobby = 'Prata'; }
-    if (interaction.customId === 'btn_elite') { valor = 9.99; nomeLobby = 'Elite'; }
-
-    // --- ABRIR TICKET E GERAR PIX ---
-    if (valor > 0) {
         await interaction.deferReply({ ephemeral: true });
 
         const channelName = `ticket-${user.username}`;
         const existingChannel = guild.channels.cache.find(c => c.name === channelName.toLowerCase());
-
         if (existingChannel) {
-            return interaction.editReply({ content: `❌ Você já possui um ticket aberto em ${existingChannel}!` });
+            return interaction.editReply({ content: `❌ Você já tem um ticket de pagamento aberto em ${existingChannel}!` });
         }
 
-        // Criar Canal Privado
+        // Criar Canal Privado de Pagamento
         const ticketChannel = await guild.channels.create({
             name: channelName,
             type: ChannelType.GuildText,
             permissionOverwrites: [
-                {
-                    id: guild.id,
-                    deny: [PermissionsBitField.Flags.ViewChannel],
-                },
-                {
-                    id: user.id,
-                    allow: [
-                        PermissionsBitField.Flags.ViewChannel, 
-                        PermissionsBitField.Flags.SendMessages, 
-                        PermissionsBitField.Flags.AttachFiles
-                    ],
-                },
-            ],
+                { id: guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+                { id: user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }
+            ]
         });
 
-        // Criar Cobrança Pix via Mercado Pago
+        // Criar Cobrança Pix no Mercado Pago
         try {
             const paymentData = {
                 body: {
-                    transaction_amount: valor,
-                    description: `Inscrição Zone Wars ${nomeLobby} - ${user.username}`,
+                    transaction_amount: VALOR_INCRICAO,
+                    description: `Inscrição Zone Wars - ${user.username}`,
                     payment_method_id: 'pix',
                     payer: {
                         email: `${user.id}@discorduser.com`,
@@ -142,16 +180,15 @@ client.on('interactionCreate', async (interaction) => {
             const qrCodeBase64 = result.point_of_interaction.transaction_data.qr_code_base64;
             const paymentId = result.id;
 
-            // Converter QR Code em Imagem
             const buffer = Buffer.from(qrCodeBase64, 'base64');
             const attachment = new AttachmentBuilder(buffer, { name: 'qrcode.png' });
 
             const embedTicket = new EmbedBuilder()
-                .setTitle(`🎟️ Inscrição Lobby ${nomeLobby} - R$ ${valor.toFixed(2)}`)
+                .setTitle(`🎟️ Inscrição Zone Wars - R$ ${VALOR_INCRICAO.toFixed(2)}`)
                 .setDescription(
-                    `Olá ${user}, faça o pagamento usando o QR Code abaixo ou o Pix Copia e Cola para validar sua vaga!\n\n` +
+                    `Olá ${user}, pague via QR Code ou Pix Copia e Cola para garantir sua vaga no lobby!\n\n` +
                     `📲 **PIX COPIA E COLA:**\n\`\`\`${pixCopiaECola}\`\`\`\n` +
-                    `⏳ *O sistema atualizará seu cargo e confirmará sua vaga automaticamente assim que o Pix for detectado!*`
+                    `⏳ *Sua vaga será confirmada e o contador do servidor atualizará assim que o Pix for aprovado!*`
                 )
                 .setImage('attachment://qrcode.png')
                 .setColor('#F1C40F');
@@ -159,70 +196,139 @@ client.on('interactionCreate', async (interaction) => {
             const closeButton = new ActionRowBuilder().addComponents(
                 new ButtonBuilder()
                     .setCustomId('fechar_ticket')
-                    .setLabel('🔒 Cancelar / Fechar Ticket')
+                    .setLabel('🔒 Cancelar Ticket')
                     .setStyle(ButtonStyle.Danger)
             );
 
             await ticketChannel.send({ 
                 content: `${user}`, 
                 embeds: [embedTicket], 
-                files: [attachment],
+                files: [attachment], 
                 components: [closeButton] 
             });
 
-            await interaction.editReply({ content: `✅ Ticket criado com sucesso em ${ticketChannel}!` });
+            await interaction.editReply({ content: `✅ Ticket de pagamento criado em ${ticketChannel}!` });
 
-            // LOOP DE CHECAGEM DO PAGAMENTO (Verifica a cada 5 segundos por até 10 minutos)
+            // Loop de verificação do Pix
             let checagens = 0;
             const interval = setInterval(async () => {
                 checagens++;
                 try {
                     const check = await paymentClient.get({ id: paymentId });
-                    
+
                     if (check.status === 'approved') {
                         clearInterval(interval);
 
-                        // 1. Dar o Cargo de Jogador
-                        const member = await guild.members.fetch(user.id);
+                        // Garante que o usuário não entrou duas vezes no processo
+                        if (!jogadoresInscritos.some(p => p.id === user.id)) {
+                            jogadoresInscritos.push({ id: user.id, tag: user.tag });
+                        }
+
+                        // Atribui Cargo no Discord
+                        const member = await guild.members.fetch(user.id).catch(() => null);
                         if (member && CARGO_JOGADOR_ID) {
                             await member.roles.add(CARGO_JOGADOR_ID).catch(console.error);
                         }
 
-                        // 2. Notificar no canal do ticket
+                        // Atualiza o contador no painel público
+                        await atualizarPainelPrincipal();
+
+                        // Envia confirmação e apaga o ticket em 10 segundos
                         const embedSucesso = new EmbedBuilder()
-                            .setTitle('✅ PAGAMENTO CONFIRMADO!')
+                            .setTitle('✅ VAGA CONFIRMADA!')
                             .setDescription(
-                                `🎉 **Parabéns ${user}!** Seu Pix de **R$ ${valor.toFixed(2)}** foi aprovado com sucesso.\n\n` +
-                                `🏷️ **Cargo Atribuído:** <@&${CARGO_JOGADOR_ID}>\n\n` +
-                                `📝 **PRÓXIMO PASSO:** Envie neste chat o seu **Epic ID exato** (Nick no Fortnite) para cadastro no Host.`
+                                `🎉 **Parabéns ${user}!** Seu Pix foi aprovado com sucesso.\n\n` +
+                                `📊 Você é o player **[ ${jogadoresInscritos.length} / ${TAMANHO_MAXIMO_LOBBY} ]** do lobby.\n` +
+                                `📩 Aguarde as instruções e a Chave da Partida que será enviada no seu privado (DM) quando o lobby lotar.`
                             )
                             .setColor('#2ECC71');
 
                         await ticketChannel.send({ content: `${user}`, embeds: [embedSucesso] });
+                        
+                        setTimeout(() => {
+                            ticketChannel.delete().catch(() => {});
+                        }, 10000);
                     }
                 } catch (err) {
-                    console.error('Erro na checagem de pagamento:', err);
+                    console.error('Erro ao checar pagamento:', err);
                 }
 
-                // Cancela a checagem após 10 minutos (120 tentativas x 5s)
-                if (checagens >= 120) {
-                    clearInterval(interval);
-                }
+                if (checagens >= 120) clearInterval(interval); // Limite de 10 minutos
             }, 5000);
 
         } catch (error) {
-            console.error('Erro ao gerar PIX:', error);
-            await ticketChannel.send('❌ Erro ao gerar a cobrança Pix. Verifique suas credenciais da API.');
+            console.error('Erro ao gerar Pix:', error);
+            await ticketChannel.send('❌ Erro ao gerar o Pix. Tente novamente mais tarde.');
         }
     }
 
-    // Botão de Fechar Ticket
-    if (interaction.customId === 'fechar_ticket') {
-        await interaction.reply('🔒 Este ticket será fechado em 5 segundos...');
-        setTimeout(() => {
-            interaction.channel.delete().catch(() => {});
-        }, 5000);
+    // Botão Fechar Ticket
+    if (interaction.isButton() && interaction.customId === 'fechar_ticket') {
+        await interaction.reply('🔒 Fechando ticket...');
+        setTimeout(() => interaction.channel.delete().catch(() => {}), 2000);
+    }
+
+    // Comandos de Administrador (Slash Commands)
+    if (interaction.isChatInputCommand()) {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+            return interaction.reply({ content: '❌ Você não tem permissão para usar este comando.', ephemeral: true });
+        }
+
+        // /iniciar-partida
+        if (interaction.commandName === 'iniciar-partida') {
+            const chave = interaction.options.getString('chave');
+            const mapa = interaction.options.getString('mapa');
+
+            if (jogadoresInscritos.length === 0) {
+                return interaction.reply({ content: '❌ Não há nenhum jogador na lista do lobby atual.', ephemeral: true });
+            }
+
+            await interaction.deferReply({ ephemeral: true });
+
+            let falhas = 0;
+            let sucessos = 0;
+
+            const embedDM = new EmbedBuilder()
+                .setTitle('🎮 SUA PARTIDA DE ZONE WARS VAI COMECAR!')
+                .setDescription(
+                    `A chave e o mapa do seu confronto já estão disponíveis:\n\n` +
+                    `🔑 **CUSTOM KEY (CHAVE):** \`${chave}\`\n` +
+                    `🗺️ **CÓDIGO DO MAPA:** \`${mapa}\`\n\n` +
+                    `⚠️ *Entre na sala no Fortnite imediatamente. Boa sorte!*`
+                )
+                .setColor('#F1C40F');
+
+            for (const player of jogadoresInscritos) {
+                try {
+                    const discordUser = await client.users.fetch(player.id);
+                    await discordUser.send({ embeds: [embedDM] });
+                    sucessos++;
+                } catch (err) {
+                    falhas++;
+                    console.error(`Não foi possível enviar DM para ${player.tag}`);
+                }
+            }
+
+            // Salva a quantidade enviada, limpa o array do lobby e zera o painel público para nova partida
+            const totalEnviados = jogadoresInscritos.length;
+            jogadoresInscritos = [];
+            await atualizarPainelPrincipal();
+
+            await interaction.editReply({
+                content: `🚀 **Partida Iniciada!**\n\n` +
+                         `✅ Códigos enviados na DM de **${sucessos}** jogadores.\n` +
+                         `${falhas > 0 ? `⚠️ **${falhas}** jogadores estão com a DM fechada e não receberam.` : ''}\n` +
+                         `🔄 O lobby do painel público foi **zerado para [ 0 / 32 ]** e está pronto para novas inscrições!`
+            });
+        }
+
+        // /resetar-lobby
+        if (interaction.commandName === 'resetar-lobby') {
+            jogadoresInscritos = [];
+            await atualizarPainelPrincipal();
+            await interaction.reply({ content: '🔄 O lobby foi zerado manualmente e o painel foi atualizado para [ 0 / 32 ]!', ephemeral: true });
+        }
     }
 });
 
-client.login(process.env.DISCORD_TOKEN);
+client.login(TOKEN);
