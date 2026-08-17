@@ -29,7 +29,7 @@ http.createServer((req, res) => {
 const TOKEN = process.env.DISCORD_TOKEN || 'MTUzNzU2ODUwNzE3MTA0NTUyNw.GdD9GG.JPV8g3UsCkZ5Tn4ZxQmMelii_x0Md4stzRNfrk'; 
 const MP_ACCESS_TOKEN = process.env.MP_TOKEN || 'APP_USR-7083602225040875-081317-dd8ad3a00eb653e204b9b4cf61a98a08-1399781162';
 const CARGO_JOGADOR_ID = '1537574697129091162';
-const VALOR_INCRICAO = 4.00;
+const VALOR_INCRICAO = 3.99;
 const TAMANHO_MAXIMO_LOBBY = 32;
 // =======================================================
 
@@ -86,7 +86,7 @@ client.once('ready', async () => {
 function gerarEmbedPainel() {
     const qtd = jogadoresInscritos.length;
     return new EmbedBuilder()
-        .setTitle('🏆 ZONE WARS COMPETITIVO - LOBBY R$ 4,00')
+        .setTitle('🏆 ZONE WARS COMPETITIVO - LOBBY R$ 3,99')
         .setDescription(
             `Entre no lobby pago e busque as maiores premiações em Pix!\n\n` +
             `📊 **STATUS DO LOBBY:** \`[ ${qtd} / ${TAMANHO_MAXIMO_LOBBY} ]\` Players Inscritos\n` +
