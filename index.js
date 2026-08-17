@@ -13,10 +13,21 @@ const {
     SlashCommandBuilder
 } = require('discord.js');
 const { MercadoPagoConfig, Payment } = require('mercadopago');
+const http = require('http');
+
+// ==================== SERVIDOR HTTP PARA O RENDER ====================
+// Evita o aviso "No open ports detected" no Render Web Service
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Bot Zone Wars Online!');
+}).listen(PORT, () => {
+    console.log(`🌐 Servidor HTTP ativo na porta ${PORT}`);
+});
 
 // ==================== CONFIGURAÇÕES ====================
-const TOKEN = process.env.DISCORD_TOKEN || 'SEU_NOVO_TOKEN_AQUI'; 
-const MP_ACCESS_TOKEN = process.env.MP_TOKEN || 'SEU_NOVO_MP_ACCESS_TOKEN_AQUI';
+const TOKEN = process.env.DISCORD_TOKEN || 'MTUzNzU2ODUwNzE3MTA0NTUyNw.GdD9GG.JPV8g3UsCkZ5Tn4ZxQmMelii_x0Md4stzRNfrk'; 
+const MP_ACCESS_TOKEN = process.env.MP_TOKEN || 'APP_USR-7083602225040875-081317-dd8ad3a00eb653e204b9b4cf61a98a08-1399781162';
 const CARGO_JOGADOR_ID = '1537574697129091162';
 const VALOR_INCRICAO = 4.00;
 const TAMANHO_MAXIMO_LOBBY = 32;
@@ -310,7 +321,6 @@ client.on('interactionCreate', async (interaction) => {
             }
 
             // Salva a quantidade enviada, limpa o array do lobby e zera o painel público para nova partida
-            const totalEnviados = jogadoresInscritos.length;
             jogadoresInscritos = [];
             await atualizarPainelPrincipal();
 
